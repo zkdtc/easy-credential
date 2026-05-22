@@ -1,0 +1,18 @@
+import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+import React from "react";
+import ReactDOM from "react-dom/client";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import "./styles.css";
+import App from "./App";
+import { AuthProvider } from "./lib/auth";
+import Dashboard from "./pages/Dashboard";
+import Wallet from "./pages/Wallet";
+import Credentials from "./pages/Credentials";
+import IssueCredential from "./pages/IssueCredential";
+import IssuerOrg from "./pages/IssuerOrg";
+import PublicCredential from "./pages/PublicCredential";
+import Login from "./pages/Login";
+const queryClient = new QueryClient();
+const appBase = import.meta.env.VITE_APP_BASE ?? "";
+ReactDOM.createRoot(document.getElementById("root")).render(_jsx(React.StrictMode, { children: _jsx(QueryClientProvider, { client: queryClient, children: _jsx(AuthProvider, { children: _jsx(BrowserRouter, { basename: appBase, children: _jsxs(Routes, { children: [_jsxs(Route, { path: "/", element: _jsx(App, {}), children: [_jsx(Route, { index: true, element: _jsx(Dashboard, {}) }), _jsx(Route, { path: "login", element: _jsx(Login, {}) }), _jsx(Route, { path: "wallet", element: _jsx(Wallet, {}) }), _jsx(Route, { path: "org", element: _jsx(IssuerOrg, {}) }), _jsx(Route, { path: "credentials", element: _jsx(Credentials, {}) }), _jsx(Route, { path: "issue", element: _jsx(IssueCredential, {}) })] }), _jsx(Route, { path: "/c/:slug", element: _jsx(PublicCredential, {}) })] }) }) }) }) }));

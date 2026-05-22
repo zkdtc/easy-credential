@@ -1,0 +1,71 @@
+services:
+  - type: web
+    name: easy-credential
+    runtime: docker
+    plan: starter
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    disk:
+      name: badge-media
+      mountPath: /app/media
+      sizeGB: 1
+    envVars:
+      - key: ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: SECRET_KEY
+        generateValue: true
+      - key: RUN_MIGRATIONS
+        value: "true"
+      - key: FRONTEND_DIST_DIR
+        value: /app/frontend/dist
+      - key: MEDIA_ROOT
+        value: /app/media
+      - key: APP_URL
+        value: https://easy-credential.onrender.com/app
+      - key: API_URL
+        value: https://easy-credential.onrender.com
+      - key: PUBLIC_URL
+        value: https://easy-credential.onrender.com
+      - key: CORS_ORIGINS
+        value: https://easy-credential.onrender.com
+      - key: DATABASE_URL
+        fromDatabase:
+          name: easy-credential-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: easy-credential-redis
+          property: connectionString
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_PUBLISHABLE_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+
+  - type: keyvalue
+    name: easy-credential-redis
+    plan: free
+    region: oregon
+    maxmemoryPolicy: allkeys-lru
+    ipAllowList: []
+
+databases:
+  - name: easy-credential-db
+    plan: free
+    region: oregon
+    postgresMajorVersion: "16"
+    databaseName: easycred
+    user: easycred
+    ipAllowList: []

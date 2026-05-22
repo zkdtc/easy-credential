@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.env
+.env.local
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+dist/
+.vite/
+*.local
+.npm/
+
+# Build / OS
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# Secrets / keys
+signing-key.pem
+*.key
+
+# Storage
+data/
+minio-data/
+postgres-data/
+backend/media/
