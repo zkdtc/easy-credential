@@ -11,19 +11,29 @@ from sqlalchemy.orm import Session as DbSession
 from app.config import get_settings
 from app.db import get_db
 from app.deps import current_user, require_csrf
-from app.models import User, WalletTransaction
+from app.models import User, Wallet, WalletTransaction
 from app.services.permissions import require_org_role
 from app.services.pricing import compute_bonus_cents
-from app.services.wallets import ensure_wallet, record_recharge
+from app.services.wallets import (
+    ensure_wallet,
+    find_transaction_by_payment_intent,
+    record_recharge,
+    record_stripe_payment_intent_recharge,
+)
 
 router = APIRouter(tags=["wallet"])
 
 
-PLACEHOLDER_STRIPE_KEYS = {"sk_test_xxx", "sk_live_xxx"}
+PLACEHOLDER_STRIPE_SECRET_KEYS = {"sk_test_xxx", "sk_live_xxx"}
+PLACEHOLDER_STRIPE_PUBLISHABLE_KEYS = {"pk_test_xxx", "pk_live_xxx"}
 
 
 class RechargeRequest(BaseModel):
     amount_cents: int = Field(ge=1_000, le=10_000_000)
+
+
+class RechargeSyncRequest(BaseModel):
+    payment_intent_id: str = Field(min_length=1, max_length=255)
 
 
 def _wallet_out(wallet) -> dict:
@@ -43,6 +53,7 @@ def _transaction_out(tx: WalletTransaction) -> dict:
         "type": tx.type,
         "amount_cents": tx.amount_cents,
         "balance_after_cents": tx.balance_after_cents,
+        "stripe_payment_intent_id": tx.stripe_payment_intent_id,
         "credential_id": str(tx.credential_id) if tx.credential_id else None,
         "note": tx.note,
         "created_at": tx.created_at.isoformat() if tx.created_at else None,
@@ -50,7 +61,31 @@ def _transaction_out(tx: WalletTransaction) -> dict:
 
 
 def _stripe_configured(secret_key: str) -> bool:
-    return bool(secret_key and secret_key not in PLACEHOLDER_STRIPE_KEYS)
+    return bool(secret_key and secret_key not in PLACEHOLDER_STRIPE_SECRET_KEYS)
+
+
+def _stripe_publishable_configured(publishable_key: str) -> bool:
+    return bool(
+        publishable_key
+        and publishable_key not in PLACEHOLDER_STRIPE_PUBLISHABLE_KEYS
+    )
+
+
+def _stripe_enabled() -> bool:
+    settings = get_settings()
+    return _stripe_configured(
+        settings.stripe_secret_key
+    ) and _stripe_publishable_configured(settings.stripe_publishable_key)
+
+
+@router.get("/stripe/config")
+def stripe_config(_user: User = Depends(current_user)) -> dict:
+    settings = get_settings()
+    enabled = _stripe_enabled()
+    return {
+        "enabled": enabled,
+        "publishable_key": settings.stripe_publishable_key if enabled else None,
+    }
 
 
 @router.get("/orgs/{org_id}/wallet")
@@ -102,7 +137,9 @@ def create_recharge(
     wallet = ensure_wallet(db, org.id)
 
     bonus_cents, bonus_bps = compute_bonus_cents(body.amount_cents)
-    if not _stripe_configured(settings.stripe_secret_key):
+    if not _stripe_enabled():
+        if settings.env.lower() == "production":
+            raise HTTPException(status_code=503, detail="stripe_not_configured")
         wallet, bonus_cents, bonus_bps = record_recharge(
             db,
             org_id=org.id,
@@ -130,6 +167,7 @@ def create_recharge(
             "org_id": str(org.id),
             "wallet_id": str(wallet.id),
             "base_amount_cents": str(body.amount_cents),
+            "bonus_cents": str(bonus_cents),
         },
     )
     db.commit()
@@ -139,6 +177,60 @@ def create_recharge(
         "amount_cents": body.amount_cents,
         "bonus_cents": bonus_cents,
         "bonus_bps": bonus_bps,
+    }
+
+
+@router.post(
+    "/orgs/{org_id}/wallet/recharge/sync",
+    dependencies=[Depends(require_csrf)],
+)
+def sync_recharge(
+    org_id: uuid.UUID,
+    body: RechargeSyncRequest,
+    user: User = Depends(current_user),
+    db: DbSession = Depends(get_db),
+) -> dict:
+    settings = get_settings()
+    org, _membership = require_org_role(
+        db, user=user, org_id=org_id, allowed_roles=("owner", "admin")
+    )
+    if not _stripe_enabled():
+        raise HTTPException(status_code=400, detail="stripe_not_configured")
+
+    existing = find_transaction_by_payment_intent(db, body.payment_intent_id)
+    if existing:
+        wallet = db.get(Wallet, existing.wallet_id)
+        return {
+            "ok": True,
+            "credited": False,
+            "wallet": _wallet_out(wallet) if wallet else None,
+        }
+
+    import stripe
+
+    stripe.api_key = settings.stripe_secret_key
+    intent = stripe.PaymentIntent.retrieve(body.payment_intent_id)
+    metadata = intent.get("metadata") or {}
+    if metadata.get("org_id") != str(org.id):
+        raise HTTPException(status_code=403, detail="payment_intent_forbidden")
+    wallet, created = record_stripe_payment_intent_recharge(
+        db,
+        payment_intent=dict(intent),
+    )
+    if not wallet:
+        return {
+            "ok": True,
+            "credited": False,
+            "status": intent.get("status"),
+            "wallet": _wallet_out(ensure_wallet(db, org.id)),
+        }
+    db.commit()
+    db.refresh(wallet)
+    return {
+        "ok": True,
+        "credited": created,
+        "status": intent.get("status"),
+        "wallet": _wallet_out(wallet),
     }
 
 
@@ -169,28 +261,18 @@ async def stripe_webhook(
     if event["type"] != "payment_intent.succeeded":
         return {"ok": True, "ignored": event["type"]}
 
-    intent = event["data"]["object"]
-    already_recorded = db.execute(
-        select(WalletTransaction.id).where(
-            WalletTransaction.stripe_payment_intent_id == intent["id"]
-        )
-    ).first()
-    if already_recorded:
+    intent = dict(event["data"]["object"])
+    if find_transaction_by_payment_intent(db, intent["id"]):
         return {"ok": True, "duplicate": True}
 
-    metadata = intent.get("metadata") or {}
     try:
-        org_id = uuid.UUID(metadata["org_id"])
-        amount_cents = int(metadata["base_amount_cents"])
+        wallet, created = record_stripe_payment_intent_recharge(
+            db,
+            payment_intent=intent,
+        )
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="missing_wallet_metadata") from exc
-
-    record_recharge(
-        db,
-        org_id=org_id,
-        amount_cents=amount_cents,
-        stripe_payment_intent_id=intent["id"],
-        note="stripe payment_intent.succeeded",
-    )
+    if not wallet or not created:
+        return {"ok": True, "credited": False}
     db.commit()
-    return {"ok": True}
+    return {"ok": True, "credited": True}

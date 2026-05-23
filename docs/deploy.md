@@ -58,6 +58,10 @@ https://your-domain.example/stripe/webhook
 ```
 
 Then set `STRIPE_WEBHOOK_SECRET` from the endpoint signing secret.
+The wallet UI uses Stripe Payment Element, so both `STRIPE_SECRET_KEY` and
+`STRIPE_PUBLISHABLE_KEY` must be set for production recharge. If either is
+missing in production, `POST /orgs/{id}/wallet/recharge` returns
+`503 stripe_not_configured`.
 
 ## Notes
 

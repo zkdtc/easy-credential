@@ -76,6 +76,48 @@ def record_recharge(
     return wallet, bonus_cents, bonus_bps
 
 
+def find_transaction_by_payment_intent(
+    db: DbSession,
+    stripe_payment_intent_id: str,
+) -> WalletTransaction | None:
+    return db.execute(
+        select(WalletTransaction).where(
+            WalletTransaction.stripe_payment_intent_id == stripe_payment_intent_id
+        )
+    ).scalar_one_or_none()
+
+
+def record_stripe_payment_intent_recharge(
+    db: DbSession,
+    *,
+    payment_intent: dict,
+) -> tuple[Wallet | None, bool]:
+    """Credit a succeeded Stripe PaymentIntent once.
+
+    Returns `(wallet, created)`. If the payment was already credited, `created`
+    is false and `wallet` is the existing wallet when it can be resolved.
+    """
+    payment_intent_id = str(payment_intent["id"])
+    existing = find_transaction_by_payment_intent(db, payment_intent_id)
+    if existing:
+        return db.get(Wallet, existing.wallet_id), False
+
+    if payment_intent.get("status") != "succeeded":
+        return None, False
+
+    metadata = payment_intent.get("metadata") or {}
+    org_id = uuid.UUID(metadata["org_id"])
+    amount_cents = int(metadata["base_amount_cents"])
+    wallet, _bonus_cents, _bonus_bps = record_recharge(
+        db,
+        org_id=org_id,
+        amount_cents=amount_cents,
+        stripe_payment_intent_id=payment_intent_id,
+        note="stripe payment_intent.succeeded",
+    )
+    return wallet, True
+
+
 def record_issue_charge(
     db: DbSession,
     *,

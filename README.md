@@ -107,7 +107,7 @@ repo-root `.env` even when launched from `backend/`.
 
 - Development login with automatic personal organization creation.
 - Wallet balance, transactions, threshold recharge bonuses, and Stripe
-  PaymentIntent/webhook scaffolding.
+  Payment Element, PaymentIntent, webhook, and wallet-sync flows.
 - Atomic credential issuance with a $3.99 wallet charge.
 - Ed25519 signatures over deterministic canonical credential payloads.
 - Public `/c/{slug}` credential pages with LinkedIn deep links and QR codes.

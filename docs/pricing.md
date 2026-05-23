@@ -20,16 +20,27 @@ tier (e.g., $2k+ → 25%) just needs a new row.
 
 ## Recharge flow
 
-1. Client → `POST /orgs/{id}/wallet/recharge {amount_cents}` → backend creates
-   Stripe `PaymentIntent` with metadata `{org_id, wallet_id, base_amount_cents}`.
-2. Stripe.js confirms payment.
-3. Stripe webhook `payment_intent.succeeded` (server-side, source of truth):
-   - Compute bonus by querying `pricing_rules` for active tier.
+1. Client reads `GET /stripe/config`. If Stripe keys are configured, the wallet
+   page loads Stripe Elements with the publishable key.
+2. Client → `POST /orgs/{id}/wallet/recharge {amount_cents}` → backend creates
+   Stripe `PaymentIntent` with metadata
+   `{org_id, wallet_id, base_amount_cents, bonus_cents}`.
+3. Stripe.js Payment Element confirms the payment using the returned
+   `client_secret`.
+4. Stripe webhook `payment_intent.succeeded` (server-side, source of truth):
+   - Compute bonus using the active recharge tier helper.
    - In a single DB transaction:
      - Insert `wallet_transactions {type: 'recharge', amount_cents: +base}`
      - Insert `wallet_transactions {type: 'bonus',    amount_cents: +bonus, note: 'tier:$300+ 15%'}`
      - `UPDATE wallets SET balance_cents = balance_cents + base + bonus`
    - Idempotent via `unique(stripe_payment_intent_id)`.
+5. Client may call `POST /orgs/{id}/wallet/recharge/sync` after a successful
+   confirmation or redirect return. The server retrieves the PaymentIntent from
+   Stripe and idempotently credits the wallet if the webhook has not arrived yet.
+
+In development, if Stripe keys are empty or placeholders, recharge uses
+`development_credit`. In production, missing Stripe keys return
+`503 stripe_not_configured` instead of crediting funds.
 
 ## Issue-charge flow (race-safe)
 ```sql

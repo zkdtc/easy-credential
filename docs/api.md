@@ -31,9 +31,11 @@ All authenticated routes require an httpOnly session cookie issued at
 - `GET  /ai/quota` — current month's usage + remaining free quota
 
 ## Wallet & payments
+- `GET  /stripe/config` — authenticated publishable-key config for Stripe Elements
 - `GET  /orgs/{id}/wallet`
 - `GET  /orgs/{id}/wallet/transactions?cursor=&limit=`
 - `POST /orgs/{id}/wallet/recharge` — body `{amount_cents}` → returns Stripe `client_secret`
+- `POST /orgs/{id}/wallet/recharge/sync` — body `{payment_intent_id}`; verifies Stripe status and idempotently credits wallet
 - `GET  /pricing/recharge-preview?amount_cents=` — server-computed bonus preview
 - `POST /stripe/webhook` — Stripe → server; verifies signature, idempotent
 

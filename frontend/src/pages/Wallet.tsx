@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
+import { Elements, PaymentElement, useElements, useStripe } from "@stripe/react-stripe-js";
+import { loadStripe } from "@stripe/stripe-js";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, fmtUSD } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -24,6 +26,7 @@ type WalletTransaction = {
   type: string;
   amount_cents: number;
   balance_after_cents: number;
+  stripe_payment_intent_id: string | null;
   note: string | null;
   created_at: string;
 };
@@ -37,7 +40,26 @@ type RechargeResponse = {
   bonus_bps: number;
 };
 
+type StripeConfig = {
+  enabled: boolean;
+  publishable_key: string | null;
+};
+
+type PaymentSession = {
+  clientSecret: string;
+  amount_cents: number;
+  bonus_cents: number;
+};
+
+type RechargeSyncResponse = {
+  ok: boolean;
+  credited: boolean;
+  status?: string;
+  wallet?: WalletSummary | null;
+};
+
 const PRESETS = [10000, 30000, 50000]; // $100, $300, $500
+const APP_BASE = import.meta.env.VITE_APP_BASE ?? "";
 
 export default function Wallet() {
   const { me, loading } = useAuth();
@@ -46,8 +68,21 @@ export default function Wallet() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [paymentSession, setPaymentSession] = useState<PaymentSession | null>(null);
+  const [syncingIntentId, setSyncingIntentId] = useState<string | null>(null);
   const defaultOrg = me?.orgs.find((o) => o.id === me.default_org_id) ?? me?.orgs[0];
   const orgId = defaultOrg?.id;
+
+  const stripeConfig = useQuery({
+    queryKey: ["stripe-config"],
+    queryFn: () => api<StripeConfig>("/stripe/config"),
+    enabled: Boolean(me),
+  });
+
+  const stripePromise = useMemo(() => {
+    const publishableKey = stripeConfig.data?.publishable_key;
+    return publishableKey ? loadStripe(publishableKey) : null;
+  }, [stripeConfig.data?.publishable_key]);
 
   const { data, isFetching } = useQuery({
     queryKey: ["preview", amount],
@@ -68,6 +103,48 @@ export default function Wallet() {
     enabled: Boolean(orgId),
   });
 
+  async function syncRecharge(paymentIntentId: string) {
+    if (!orgId) return;
+    setSyncingIntentId(paymentIntentId);
+    setError(null);
+    try {
+      const result = await api<RechargeSyncResponse>(
+        `/orgs/${orgId}/wallet/recharge/sync`,
+        {
+          method: "POST",
+          body: JSON.stringify({ payment_intent_id: paymentIntentId }),
+        }
+      );
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["wallet", orgId] }),
+        queryClient.invalidateQueries({ queryKey: ["wallet-transactions", orgId] }),
+      ]);
+      if (result.credited) {
+        setMessage("Payment succeeded and wallet credit was added.");
+        setPaymentSession(null);
+      } else if (result.status === "succeeded") {
+        setMessage("Payment was already credited.");
+        setPaymentSession(null);
+      } else {
+        setMessage(`Payment is ${result.status ?? "processing"}. Wallet will update after confirmation.`);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to sync payment.");
+    } finally {
+      setSyncingIntentId(null);
+    }
+  }
+
+  useEffect(() => {
+    if (!orgId) return;
+    const params = new URLSearchParams(window.location.search);
+    const paymentIntentId = params.get("payment_intent");
+    if (!paymentIntentId || syncingIntentId === paymentIntentId) return;
+    syncRecharge(paymentIntentId);
+    window.history.replaceState({}, "", `${window.location.pathname}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orgId]);
+
   async function recharge() {
     if (!orgId) return;
     setSubmitting(true);
@@ -78,16 +155,25 @@ export default function Wallet() {
         method: "POST",
         body: JSON.stringify({ amount_cents: amount }),
       });
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["wallet", orgId] }),
-        queryClient.invalidateQueries({ queryKey: ["wallet-transactions", orgId] }),
-      ]);
       if (result.mode === "development_credit") {
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ["wallet", orgId] }),
+          queryClient.invalidateQueries({ queryKey: ["wallet-transactions", orgId] }),
+        ]);
+        setPaymentSession(null);
         setMessage(
           `${fmtUSD(result.amount_cents + result.bonus_cents)} credited to ${defaultOrg?.name}.`
         );
       } else {
-        setMessage("Stripe payment intent created. Connect Stripe.js to confirm it.");
+        if (!result.client_secret) {
+          throw new Error("Stripe did not return a client secret.");
+        }
+        setPaymentSession({
+          clientSecret: result.client_secret,
+          amount_cents: result.amount_cents,
+          bonus_cents: result.bonus_cents,
+        });
+        setMessage("Payment form ready. Confirm the payment below.");
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to recharge wallet.");
@@ -140,7 +226,7 @@ export default function Wallet() {
             </div>
           </div>
           <p className="mt-5 text-sm leading-6 text-slate-600">
-            Higher recharges receive bonus credit automatically in development mode.
+            Higher recharges receive bonus credit automatically after payment confirmation.
           </p>
         </section>
 
@@ -201,8 +287,36 @@ export default function Wallet() {
               disabled={isFetching || submitting || amount < 1000}
               onClick={recharge}
             >
-              {submitting ? "Adding funds..." : "Add funds"}
+              {submitting ? "Preparing..." : stripeConfig.data?.enabled ? "Continue to payment" : "Add funds"}
             </button>
+
+            {paymentSession && stripePromise && (
+              <div className="rounded-lg border border-slate-200 bg-white p-4">
+                <div className="mb-4">
+                  <h3 className="font-semibold text-slate-950">Payment</h3>
+                  <p className="mt-1 text-sm text-slate-500">
+                    Pay {fmtUSD(paymentSession.amount_cents)}
+                    {paymentSession.bonus_cents > 0
+                      ? ` and receive ${fmtUSD(paymentSession.bonus_cents)} bonus credit.`
+                      : "."}
+                  </p>
+                </div>
+                <Elements
+                  stripe={stripePromise}
+                  options={{
+                    clientSecret: paymentSession.clientSecret,
+                    appearance: { theme: "stripe" },
+                  }}
+                >
+                  <StripePaymentForm
+                    disabled={Boolean(syncingIntentId)}
+                    onPaymentIntent={syncRecharge}
+                    onError={setError}
+                    onMessage={setMessage}
+                  />
+                </Elements>
+              </div>
+            )}
           </div>
         </section>
       </div>
@@ -236,5 +350,59 @@ export default function Wallet() {
         </div>
       </section>
     </div>
+  );
+}
+
+function StripePaymentForm({
+  disabled,
+  onPaymentIntent,
+  onError,
+  onMessage,
+}: {
+  disabled: boolean;
+  onPaymentIntent: (paymentIntentId: string) => Promise<void>;
+  onError: (message: string | null) => void;
+  onMessage: (message: string | null) => void;
+}) {
+  const stripe = useStripe();
+  const elements = useElements();
+  const [confirming, setConfirming] = useState(false);
+
+  async function confirmPayment(e: FormEvent) {
+    e.preventDefault();
+    if (!stripe || !elements) return;
+    setConfirming(true);
+    onError(null);
+    onMessage(null);
+    const { error, paymentIntent } = await stripe.confirmPayment({
+      elements,
+      confirmParams: {
+        return_url: `${window.location.origin}${APP_BASE}/wallet`,
+      },
+      redirect: "if_required",
+    });
+    if (error) {
+      onError(error.message ?? "Payment could not be confirmed.");
+      setConfirming(false);
+      return;
+    }
+    if (paymentIntent?.id) {
+      await onPaymentIntent(paymentIntent.id);
+    } else {
+      onMessage("Payment submitted. Wallet will update after Stripe confirms it.");
+    }
+    setConfirming(false);
+  }
+
+  return (
+    <form onSubmit={confirmPayment} className="space-y-4">
+      <PaymentElement />
+      <button
+        className="btn w-full"
+        disabled={!stripe || !elements || confirming || disabled}
+      >
+        {confirming || disabled ? "Confirming..." : "Pay now"}
+      </button>
+    </form>
   );
 }
