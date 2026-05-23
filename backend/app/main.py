@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import REPO_ROOT, get_settings
-from app.routers import auth, credentials, design, health, orgs, pricing, wallets
+from app.routers import admin, auth, credentials, design, health, orgs, pricing, wallets
 from app.services.badge_assets import media_root_path
 
 settings = get_settings()
@@ -56,6 +56,7 @@ def create_app() -> FastAPI:
         max_age=600,
     )
 
+    app.include_router(admin.router)
     app.include_router(health.router)
     app.include_router(pricing.router)
     app.include_router(auth.router)

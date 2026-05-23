@@ -79,6 +79,9 @@ class Settings(BaseSettings):
     resend_api_key: str = ""
     email_from: str = "notifications@send.easylearning.ai"
 
+    # Admin
+    admin_secret_key: str = ""
+
     # Pricing
     credential_price_cents: int = 399
 
