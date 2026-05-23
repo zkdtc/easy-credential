@@ -29,7 +29,7 @@ PLACEHOLDER_STRIPE_PUBLISHABLE_KEYS = {"pk_test_xxx", "pk_live_xxx"}
 
 
 class RechargeRequest(BaseModel):
-    amount_cents: int = Field(ge=1_000, le=10_000_000)
+    amount_cents: int = Field(ge=100, le=10_000_000)
 
 
 class RechargeSyncRequest(BaseModel):
@@ -209,14 +209,32 @@ def sync_recharge(
     import stripe
 
     stripe.api_key = settings.stripe_secret_key
-    intent = stripe.PaymentIntent.retrieve(body.payment_intent_id)
+    try:
+        intent = stripe.PaymentIntent.retrieve(body.payment_intent_id)
+    except stripe.error.StripeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"stripe_retrieve_failed: {getattr(exc, 'user_message', None) or str(exc)}",
+        ) from exc
+
     metadata = intent.get("metadata") or {}
+    # If metadata.org_id is missing, the PaymentIntent was likely created on a
+    # different Stripe account or test/live mode mismatch — surface clearly.
+    if not metadata.get("org_id"):
+        raise HTTPException(
+            status_code=409,
+            detail="payment_intent_missing_metadata: org_id absent (check Stripe key mode and metadata)",
+        )
     if metadata.get("org_id") != str(org.id):
         raise HTTPException(status_code=403, detail="payment_intent_forbidden")
-    wallet, created = record_stripe_payment_intent_recharge(
-        db,
-        payment_intent=dict(intent),
-    )
+
+    try:
+        wallet, created = record_stripe_payment_intent_recharge(
+            db,
+            payment_intent=dict(intent),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not wallet:
         return {
             "ok": True,

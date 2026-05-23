@@ -251,7 +251,7 @@ export default function Wallet() {
               <span className="label">Custom amount (USD)</span>
               <input
                 type="number"
-                min={10}
+                min={1}
                 step="0.01"
                 value={(amount / 100).toFixed(2)}
                 onChange={(e) =>
@@ -284,7 +284,7 @@ export default function Wallet() {
 
             <button
               className="btn"
-              disabled={isFetching || submitting || amount < 1000}
+              disabled={isFetching || submitting || amount < 100}
               onClick={recharge}
             >
               {submitting ? "Preparing..." : stripeConfig.data?.enabled ? "Continue to payment" : "Add funds"}

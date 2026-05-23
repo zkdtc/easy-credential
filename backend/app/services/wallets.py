@@ -106,8 +106,28 @@ def record_stripe_payment_intent_recharge(
         return None, False
 
     metadata = payment_intent.get("metadata") or {}
-    org_id = uuid.UUID(metadata["org_id"])
-    amount_cents = int(metadata["base_amount_cents"])
+    org_id_raw = metadata.get("org_id")
+    if not org_id_raw:
+        raise ValueError("missing_metadata_org_id")
+    try:
+        org_id = uuid.UUID(org_id_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid_metadata_org_id") from exc
+
+    # Prefer the base_amount_cents we stored at PaymentIntent creation; if it
+    # was somehow stripped, fall back to the PaymentIntent's actual `amount`
+    # so the user still gets credited the value they paid.
+    base_raw = metadata.get("base_amount_cents")
+    if base_raw is not None:
+        try:
+            amount_cents = int(base_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid_metadata_base_amount_cents") from exc
+    else:
+        amount_cents = int(payment_intent.get("amount") or 0)
+    if amount_cents <= 0:
+        raise ValueError("invalid_amount")
+
     wallet, _bonus_cents, _bonus_bps = record_recharge(
         db,
         org_id=org_id,
