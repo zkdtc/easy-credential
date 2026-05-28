@@ -28,7 +28,8 @@ export default function App() {
           <nav className="flex flex-wrap items-center gap-2">
             <NavLink to="/" end className={navCls}>Dashboard</NavLink>
             <NavLink to="/credentials" className={navCls}>Credentials</NavLink>
-            <NavLink to="/issue" className={navCls}>Issue</NavLink>
+            <NavLink to="/issue" end className={navCls}>Issue</NavLink>
+            <NavLink to="/issue/batch" className={navCls}>Batch</NavLink>
             <NavLink to="/wallet" className={navCls}>Wallet</NavLink>
             <NavLink to="/org" className={navCls}>Issuer org</NavLink>
             {loading ? (

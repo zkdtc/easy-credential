@@ -64,6 +64,30 @@ class RevokeRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=1_000)
 
 
+class BatchRecipient(BaseModel):
+    recipient_name: str = Field(min_length=1, max_length=255)
+    recipient_email: EmailStr
+    recipient_linkedin_url: str | None = Field(default=None, max_length=1024)
+
+
+class CredentialBatchIssue(BaseModel):
+    org_id: uuid.UUID
+    credential_name: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=4_000)
+    requirements: str | None = Field(default=None, max_length=4_000)
+    skills: list[str] = Field(default_factory=list, max_length=25)
+    expires_at: datetime | None = None
+    image_url: str | None = Field(default=None, max_length=1024)
+    design_json: dict[str, Any] = Field(default_factory=dict)
+    template_id: uuid.UUID | None = None
+    recipients: list[BatchRecipient] = Field(min_length=1, max_length=500)
+
+    @field_validator("skills")
+    @classmethod
+    def clean_skills(cls, value: list[str]) -> list[str]:
+        return [skill.strip()[:80] for skill in value if skill.strip()]
+
+
 def _public_url(slug: str) -> str:
     return f"{get_settings().public_url.rstrip('/')}/c/{slug}"
 
@@ -192,6 +216,66 @@ def _portable_response(
     )
 
 
+def _issue_one_credential(
+    db: DbSession,
+    *,
+    org: Org,
+    user: User,
+    wallet,
+    signing_key: SigningKey,
+    price_cents: int,
+    credential_name: str,
+    description: str | None,
+    recipient_name: str,
+    recipient_email: str,
+    recipient_linkedin_url: str | None,
+    requirements: str | None,
+    skills: list[str],
+    expires_at: datetime | None,
+    image_url: str | None,
+    design_json: dict,
+    template_id: uuid.UUID | None,
+) -> Credential:
+    """Issue a single credential within an existing transaction.
+
+    Caller is responsible for locking the wallet, validating funds, and
+    committing/rolling back the transaction. Does not commit by itself so it
+    can be used inside a batch.
+    """
+    credential = Credential(
+        id=uuid.uuid4(),
+        public_slug=_unique_public_slug(db),
+        org_id=org.id,
+        issued_by_user_id=user.id,
+        template_id=template_id,
+        design_json=design_json,
+        image_url=image_url,
+        credential_name=credential_name,
+        description=description,
+        recipient_name=recipient_name,
+        recipient_email=recipient_email.lower(),
+        recipient_linkedin_url=recipient_linkedin_url,
+        requirements=requirements,
+        skills=skills,
+        issued_at=datetime.now(UTC),
+        expires_at=expires_at,
+        signature="pending",
+        signing_key_id=signing_key.id,
+    )
+    db.add(credential)
+    db.flush()
+    credential.signature = sign_payload(
+        signing_key, build_credential_payload(credential, org)
+    )
+    record_issue_charge(
+        db,
+        wallet=wallet,
+        credential_id=credential.id,
+        amount_cents=price_cents,
+    )
+    return credential
+
+
 @router.post(
     "/credentials",
     status_code=201,
@@ -217,36 +301,24 @@ def issue_credential(
         )
 
     signing_key = ensure_active_signing_key(db)
-    credential = Credential(
-        id=uuid.uuid4(),
-        public_slug=_unique_public_slug(db),
-        org_id=org.id,
-        issued_by_user_id=user.id,
-        template_id=body.template_id,
-        design_json=body.design_json,
-        image_url=body.image_url,
+    credential = _issue_one_credential(
+        db,
+        org=org,
+        user=user,
+        wallet=wallet,
+        signing_key=signing_key,
+        price_cents=settings.credential_price_cents,
         credential_name=body.credential_name,
         description=body.description,
         recipient_name=body.recipient_name,
-        recipient_email=str(body.recipient_email).lower(),
+        recipient_email=str(body.recipient_email),
         recipient_linkedin_url=body.recipient_linkedin_url,
         requirements=body.requirements,
         skills=body.skills,
-        issued_at=datetime.now(UTC),
         expires_at=body.expires_at,
-        signature="pending",
-        signing_key_id=signing_key.id,
-    )
-    db.add(credential)
-    db.flush()
-    credential.signature = sign_payload(
-        signing_key, build_credential_payload(credential, org)
-    )
-    record_issue_charge(
-        db,
-        wallet=wallet,
-        credential_id=credential.id,
-        amount_cents=settings.credential_price_cents,
+        image_url=body.image_url,
+        design_json=body.design_json,
+        template_id=body.template_id,
     )
     db.commit()
     db.refresh(credential)
@@ -254,6 +326,103 @@ def issue_credential(
     return {
         "credential": _credential_out(credential, org),
         "wallet_balance_cents": wallet.balance_cents,
+    }
+
+
+@router.post(
+    "/credentials/batch",
+    status_code=201,
+    dependencies=[Depends(require_csrf)],
+)
+def issue_credentials_batch(
+    body: CredentialBatchIssue,
+    user: User = Depends(current_user),
+    db: DbSession = Depends(get_db),
+) -> dict:
+    """Issue the same credential to many recipients in a single transaction.
+
+    All-or-nothing semantics: if the wallet can't fund every credential, the
+    request fails up-front with 402. Per-recipient validation errors (e.g.
+    duplicate emails inside the same batch) are reported in the response
+    rows so the caller can download a status CSV.
+    """
+    settings = get_settings()
+    org, _membership = require_org_role(db, user=user, org_id=body.org_id)
+    wallet = locked_wallet(db, org.id)
+    price_cents = settings.credential_price_cents
+    total_recipients = len(body.recipients)
+    total_cost = price_cents * total_recipients
+
+    if wallet.balance_cents < total_cost:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code": "wallet.insufficient_funds",
+                "message": (
+                    "Wallet balance is insufficient to issue the entire batch."
+                ),
+                "required_cents": total_cost,
+                "balance_cents": wallet.balance_cents,
+                "recipients": total_recipients,
+                "price_cents_each": price_cents,
+            },
+        )
+
+    signing_key = ensure_active_signing_key(db)
+    results: list[dict] = []
+    issued: list[Credential] = []
+    seen_emails: set[str] = set()
+
+    for index, recipient in enumerate(body.recipients):
+        email_lower = str(recipient.recipient_email).lower()
+        row_key = {
+            "index": index,
+            "recipient_name": recipient.recipient_name,
+            "recipient_email": email_lower,
+        }
+        if email_lower in seen_emails:
+            results.append({**row_key, "status": "skipped", "error": "duplicate_email_in_batch"})
+            continue
+        seen_emails.add(email_lower)
+        try:
+            credential = _issue_one_credential(
+                db,
+                org=org,
+                user=user,
+                wallet=wallet,
+                signing_key=signing_key,
+                price_cents=price_cents,
+                credential_name=body.credential_name,
+                description=body.description,
+                recipient_name=recipient.recipient_name,
+                recipient_email=email_lower,
+                recipient_linkedin_url=recipient.recipient_linkedin_url,
+                requirements=body.requirements,
+                skills=body.skills,
+                expires_at=body.expires_at,
+                image_url=body.image_url,
+                design_json=body.design_json,
+                template_id=body.template_id,
+            )
+            issued.append(credential)
+            results.append({
+                **row_key,
+                "status": "ok",
+                "credential": _credential_out(credential, org),
+            })
+        except Exception as exc:  # pragma: no cover - defensive guard
+            results.append({**row_key, "status": "error", "error": str(exc)})
+
+    db.commit()
+    db.refresh(wallet)
+    return {
+        "org_id": str(org.id),
+        "total_requested": total_recipients,
+        "issued_count": len(issued),
+        "skipped_count": sum(1 for r in results if r["status"] != "ok"),
+        "amount_charged_cents": price_cents * len(issued),
+        "wallet_balance_cents": wallet.balance_cents,
+        "results": results,
     }
 
 

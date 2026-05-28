@@ -9,6 +9,7 @@ import Dashboard from "./pages/Dashboard";
 import Wallet from "./pages/Wallet";
 import Credentials from "./pages/Credentials";
 import IssueCredential from "./pages/IssueCredential";
+import BatchIssue from "./pages/BatchIssue";
 import IssuerOrg from "./pages/IssuerOrg";
 import PublicCredential from "./pages/PublicCredential";
 import Login from "./pages/Login";
@@ -29,6 +30,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
               <Route path="org" element={<IssuerOrg />} />
               <Route path="credentials" element={<Credentials />} />
               <Route path="issue" element={<IssueCredential />} />
+              <Route path="issue/batch" element={<BatchIssue />} />
             </Route>
             <Route path="/c/:slug" element={<PublicCredential />} />
           </Routes>
