@@ -1,8 +1,15 @@
 import { ChangeEvent, FormEvent, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { api, fmtUSD } from "@/lib/api";
+import { api, apiForm, fmtUSD } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+
+type BadgeAssetResponse = {
+  image_url: string;
+  source: "upload" | "openai" | "local";
+};
+
+const DEFAULT_EXPIRES_AT = "2029-12-31";
 
 type WalletSummary = { balance_cents: number };
 
@@ -53,8 +60,16 @@ export default function BatchIssue() {
   const [description, setDescription] = useState("");
   const [requirements, setRequirements] = useState("");
   const [skills, setSkills] = useState("");
-  const [expiresAt, setExpiresAt] = useState("");
+  const [expiresAt, setExpiresAt] = useState(DEFAULT_EXPIRES_AT);
   const [imageUrl, setImageUrl] = useState("");
+
+  // Badge image upload / generate state (shared across all batch recipients)
+  const [uploadingBadge, setUploadingBadge] = useState(false);
+  const [generatingBadge, setGeneratingBadge] = useState(false);
+  const [badgePrompt, setBadgePrompt] = useState("");
+  const [badgeStyle, setBadgeStyle] = useState("modern");
+  const [badgeMessage, setBadgeMessage] = useState<string | null>(null);
+  const [badgeError, setBadgeError] = useState<string | null>(null);
 
   const [csvText, setCsvText] = useState("");
   const [csvFileName, setCsvFileName] = useState<string | null>(null);
@@ -85,6 +100,66 @@ export default function BatchIssue() {
 
   function downloadTemplate() {
     downloadBlob(CSV_TEMPLATE, "batch-recipients-template.csv", "text/csv");
+  }
+
+  async function uploadBadge(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file || !orgId) return;
+    setBadgeMessage(null);
+    setBadgeError(null);
+    setUploadingBadge(true);
+    try {
+      const form = new FormData();
+      form.append("org_id", orgId);
+      form.append("file", file);
+      const uploaded = await apiForm<BadgeAssetResponse>(
+        "/assets/badges/upload",
+        form
+      );
+      setImageUrl(uploaded.image_url);
+      setBadgeMessage("Badge image uploaded.");
+    } catch (err) {
+      setBadgeError(
+        err instanceof Error ? err.message : "Unable to upload badge image."
+      );
+    } finally {
+      setUploadingBadge(false);
+      // Reset the file input so re-selecting the same file re-fires onChange.
+      event.target.value = "";
+    }
+  }
+
+  async function generateBadge() {
+    if (!orgId) return;
+    if (!badgePrompt.trim()) {
+      setBadgeError("Enter a short prompt describing the badge artwork.");
+      return;
+    }
+    setBadgeMessage(null);
+    setBadgeError(null);
+    setGeneratingBadge(true);
+    try {
+      const generated = await api<BadgeAssetResponse>("/ai/design/image", {
+        method: "POST",
+        body: JSON.stringify({
+          org_id: orgId,
+          prompt: badgePrompt.trim(),
+          style: badgeStyle,
+        }),
+      });
+      setImageUrl(generated.image_url);
+      setBadgeMessage(
+        generated.source === "openai"
+          ? "Badge generated with AI."
+          : "Badge generated locally (no OpenAI key configured)."
+      );
+    } catch (err) {
+      setBadgeError(
+        err instanceof Error ? err.message : "Unable to generate badge image."
+      );
+    } finally {
+      setGeneratingBadge(false);
+    }
   }
 
   async function submit(e: FormEvent) {
@@ -227,7 +302,7 @@ export default function BatchIssue() {
                   onChange={(e) => setSkills(e.target.value)}
                 />
               </label>
-              <label className="block">
+              <label className="block md:col-span-2">
                 <span className="label">Expires</span>
                 <input
                   className="input mt-1"
@@ -236,8 +311,56 @@ export default function BatchIssue() {
                   onChange={(e) => setExpiresAt(e.target.value)}
                 />
               </label>
-              <label className="block">
-                <span className="label">Badge image URL</span>
+            </div>
+
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+              <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                <div>
+                  <h3 className="font-semibold text-slate-950">Badge image</h3>
+                  <p className="mt-1 text-sm text-slate-500">
+                    Upload artwork, generate one with AI, or paste an image URL —
+                    used for every credential in the batch.
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  <label className="btn-secondary cursor-pointer">
+                    {uploadingBadge ? "Uploading..." : "Upload"}
+                    <input
+                      className="sr-only"
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      onChange={uploadBadge}
+                      disabled={uploadingBadge || !orgId}
+                    />
+                  </label>
+                </div>
+              </div>
+
+              <div className="mt-4 grid gap-3 md:grid-cols-[1fr_140px_auto]">
+                <input
+                  className="input"
+                  value={badgePrompt}
+                  onChange={(e) => setBadgePrompt(e.target.value)}
+                  placeholder="Describe the badge (e.g. 'cloud certification with gold ring')"
+                />
+                <input
+                  className="input"
+                  value={badgeStyle}
+                  onChange={(e) => setBadgeStyle(e.target.value)}
+                  placeholder="style"
+                />
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={generateBadge}
+                  disabled={generatingBadge || !orgId}
+                >
+                  {generatingBadge ? "Generating..." : "Generate with AI"}
+                </button>
+              </div>
+
+              <label className="mt-4 block">
+                <span className="label">Or paste an image URL</span>
                 <input
                   className="input mt-1"
                   value={imageUrl}
@@ -245,6 +368,37 @@ export default function BatchIssue() {
                   placeholder="https://..."
                 />
               </label>
+
+              {(badgeMessage || badgeError) && (
+                <div className="mt-3">
+                  {badgeError && <div className="alert-error">{badgeError}</div>}
+                  {badgeMessage && !badgeError && (
+                    <div className="alert-success">{badgeMessage}</div>
+                  )}
+                </div>
+              )}
+
+              {imageUrl && (
+                <div className="mt-4 flex items-center gap-4">
+                  <div className="h-24 w-24 overflow-hidden rounded-full border border-slate-200 bg-white">
+                    <img
+                      src={imageUrl}
+                      alt="badge preview"
+                      className="h-full w-full object-cover"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className="text-xs font-medium text-slate-500 underline"
+                    onClick={() => {
+                      setImageUrl("");
+                      setBadgeMessage(null);
+                    }}
+                  >
+                    Remove image
+                  </button>
+                </div>
+              )}
             </div>
 
             <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
