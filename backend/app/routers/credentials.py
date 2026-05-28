@@ -433,13 +433,20 @@ def list_credentials(
     db: DbSession = Depends(get_db),
     q: str | None = Query(default=None, max_length=120),
     status: str | None = Query(default=None, pattern="^(active|revoked|expired)$"),
-    limit: int = Query(50, ge=1, le=100),
-) -> list[dict]:
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> dict:
+    """List credentials for an org with filter + pagination.
+
+    Returns an object with ``items``, ``total``, ``limit``, ``offset`` and
+    ``has_more`` so the client can render correct totals and a Load-more
+    button. (Previously returned a bare array capped at 50.)
+    """
     org, _membership = require_org_role(db, user=user, org_id=org_id)
-    stmt = select(Credential).where(Credential.org_id == org.id)
+    base = select(Credential).where(Credential.org_id == org.id)
     if q:
         needle = f"%{q.strip()}%"
-        stmt = stmt.where(
+        base = base.where(
             or_(
                 Credential.credential_name.ilike(needle),
                 Credential.recipient_name.ilike(needle),
@@ -448,15 +455,28 @@ def list_credentials(
         )
     now = datetime.now(UTC)
     if status == "active":
-        stmt = stmt.where(Credential.revoked_at.is_(None)).where(
+        base = base.where(Credential.revoked_at.is_(None)).where(
             or_(Credential.expires_at.is_(None), Credential.expires_at > now)
         )
     elif status == "revoked":
-        stmt = stmt.where(Credential.revoked_at.is_not(None))
+        base = base.where(Credential.revoked_at.is_not(None))
     elif status == "expired":
-        stmt = stmt.where(Credential.revoked_at.is_(None), Credential.expires_at <= now)
-    rows = db.execute(stmt.order_by(desc(Credential.issued_at)).limit(limit)).scalars()
-    return [_credential_out(credential, org) for credential in rows]
+        base = base.where(Credential.revoked_at.is_(None), Credential.expires_at <= now)
+
+    total = db.execute(
+        select(func.count()).select_from(base.subquery())
+    ).scalar_one()
+    rows = db.execute(
+        base.order_by(desc(Credential.issued_at)).offset(offset).limit(limit)
+    ).scalars()
+    items = [_credential_out(credential, org) for credential in rows]
+    return {
+        "items": items,
+        "total": int(total),
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(items) < int(total),
+    }
 
 
 @router.get("/credentials/{credential_id}")

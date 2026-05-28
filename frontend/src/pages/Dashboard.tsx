@@ -12,6 +12,13 @@ type Credential = {
   issued_at: string;
   public_url: string;
 };
+type CredentialsPage = {
+  items: Credential[];
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+};
 
 export default function Dashboard() {
   const { me, loading } = useAuth();
@@ -25,8 +32,11 @@ export default function Dashboard() {
   });
 
   const credentials = useQuery({
-    queryKey: ["credentials", orgId],
-    queryFn: () => api<Credential[]>(`/credentials?org_id=${orgId}`),
+    queryKey: ["credentials", orgId, "dashboard"],
+    // Dashboard only needs the latest few + counts. Fetch a small page; the
+    // server still returns `total` for the stats card.
+    queryFn: () =>
+      api<CredentialsPage>(`/credentials?org_id=${orgId}&limit=20`),
     enabled: Boolean(orgId),
   });
 
@@ -52,7 +62,10 @@ export default function Dashboard() {
     );
   }
 
-  const items = credentials.data ?? [];
+  const items = credentials.data?.items ?? [];
+  const total = credentials.data?.total ?? items.length;
+  // Active/revoked stats are based on the page we loaded; the precise
+  // overall total uses `total` from the server.
   const activeCount = items.filter((item) => item.status === "active").length;
   const revokedCount = items.filter((item) => item.status === "revoked").length;
   const recent = items.slice(0, 5);
@@ -84,7 +97,7 @@ export default function Dashboard() {
           link="/wallet"
           accent="sky"
         />
-        <Stat label="Issued" value={String(items.length)} accent="slate" />
+        <Stat label="Issued" value={String(total)} accent="slate" />
         <Stat label="Active" value={String(activeCount)} accent="emerald" />
         <Stat label="Revoked" value={String(revokedCount)} accent="amber" />
       </div>
